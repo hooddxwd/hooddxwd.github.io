@@ -1,0 +1,120 @@
+PacketIn消息：当switch没有匹配某Packet的流表规则时，从switch发送到Controller的OpenFlow消息
+
+在这个文章里，添加一个新的PacketIn listener来储存PacketIn消息，之后使这些信息通过REST API可读。
+1.1.创建class
+
+在scr/main/java 文件夹里创建class
+
+Package：net.floodlightcontroller.pktinhistory
+
+name：PktInHistory
+
+Interfaces: IFloodlightModule  IOFMessageListener
+
+1.2.设置Module Dependencies
+
+因为要监听OpenFlow消息，需要用FloodlightProvider (IFloodlightProviderService class)注册，在class里加入成员变量
+
+protectedIFloodlightProviderService floodlightProvider;
+
+与module loading系统连线，修改getModuleDependencies()
+@Override
+public Collection<Class<? extends IFloodlightService>> getModuleDependencies() {
+    Collection<Class<? extends IFloodlightService>> l = new ArrayList<Class<? extends IFloodlightService>>();
+    l.add(IFloodlightProviderService.class);
+    return l;
+}
+
+接下来初始化，并创建内部数据结构（Circular Buffer）
+@Override
+public void init(FloodlightModuleContext context) throws FloodlightModuleException {
+    floodlightProvider = context.getServiceImpl(IFloodlightProviderService.class);
+}
+
+1.3.处理OpenFlow消息
+在StartUp()里处理OpenFlow的PacketIn消息
+@Override
+public void startUp(FloodlightModuleContext context) {
+    floodlightProvider.addOFMessageListener(OFType.PACKET_IN, this);
+}
+
+用getName()放入ID
+@Override
+public String getName() {
+    return "PktInHistory";
+}
+
+isCallbackOrderingPrereq()和isCallbackOrderingPostreq()保持return false，因为我们不在乎PacketIn processing chain里的顺序
+接下来创建一个circular buffer来储存PacketIn消息，定义一个成员变量
+protected ConcurrentCircularBuffer<SwitchMessagePair> buffer;
+
+在Init()里初始化（import ConcurrentCircularBuffer）
+@Override
+public void init(FloodlightModuleContext context) throws FloodlightModuleException {
+    floodlightProvider = context.getServiceImpl(IFloodlightProviderService.class);
+    buffer = new ConcurrentCircularBuffer<SwitchMessagePair>(SwitchMessagePair.class, 100);
+}
+
+接下来在receive()里定义当模块收到PacketIn消息时的行为
+@Override
+public Command receive(IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
+    switch(msg.getType()) {
+         case PACKET_IN:
+             buffer.add(new SwitchMessagePair(sw, msg));
+             break;
+        default:
+            break;
+     }
+     return Command.CONTINUE;
+}
+对于每一个PacketIn消息，把它加入buffer中
+返回值为Command.CONTINUE，告知IFloodlightProvider把PacketIn传给下一个模块
+返回值为Command.STOP表示在这停止
+
+2.1.添加REST API
+现在有了一个完整的模块实现，但是没法从中得到信息。接下来，让模块输出一个service并把它绑定到REST API模块上
+添加一个Restlet的步骤为：
+    1.在net.floodlightcontroller.controller.internal.Controller里注册一个Restlet
+    2.实现一个*WebRoutable类，这个类实现了RestletRoutable并且提供getRestlet()和basePath()
+    3.实现一个继承了ServerResource的*Resource类，并且实现了@Get和@Put函数
+接下来在net.floodlightcontroller.pktinhistory中创建一个继承自IFloodlightService的接口IPktinHistoryService,这个service有一个方法：getBuffer()，用以检索Circular Buffer。
+package net.floodlightcontroller.pktinhistory;
+
+import net.floodlightcontroller.core.module.IFloodlightService;
+import net.floodlightcontroller.core.types.SwitchMessagePair;
+import net.floodlightcontroller.util.ConcurrentCircularBuffer;
+
+public interface IPktInHistoryService extends IFloodlightService {
+	public ConcurrentCircularBuffer<SwitchMessagePair> getBuffer();
+}
+
+接下来在PktInHistory模块里，让它能够实现IPktInHistoryService接口
+public class PktInHistory implements IFloodlightModule, IPktinHistoryService, IOFMessageListener {
+
+然后就要实现getMethod()这一方法
+@Override
+public ConcurrentCircularBuffer<SwitchMessagePair> getBuffer() {
+    return buffer;
+}
+
+告知模块系统，提供IPktInHistoryService。在getModuleServices()和getServiceImpls()中进行修改
+@Override
+public Collection<Class<? extends IFloodlightService>> getModuleServices() {
+    Collection<Class<? extends IFloodlightService>> l = new ArrayList<Class<? extends IFloodlightService>>();
+    l.add(IPktInHistoryService.class);
+    return l;
+}
+
+@Override
+public Map<Class<? extends IFloodlightService>, IFloodlightService> getServiceImpls() {
+    Map<Class<? extends IFloodlightService>, IFloodlightService> m = new HashMap<Class<? extends IFloodlightService>, IFloodlightService>();
+    m.put(IPktInHistoryService.class, this);
+    return m;
+}
+(需要import java.util.HashMap;)
+（原文中为IPktinHistoryService.class，疑为笔误）
+getServiceImpls()告知模块系统，我们是提供service的类
+
+给REST API服务提供一个引用
+protected IRestApiService restApi;
+（需要import net.floodlightcontroller.restserver.IRestApiService;）
