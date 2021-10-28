@@ -1,5 +1,5 @@
 ---
 layout: mypost
-title: Vue学习笔记1
+title: Vue ElementUI学习笔记1
 categories: [Vue, ElementUI]
 ---
